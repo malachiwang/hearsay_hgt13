@@ -68,3 +68,51 @@ Splice analysis is supporting evidence for partial edits such as word
 replacement, cut-and-paste joins, or abrupt scene/background changes. A fully
 synthetic clip may contain no splice, so a low splice score is not proof that a
 clip is bona fide.
+
+## Fusion
+
+The `fusion` package combines already-computed numeric detector outputs; it
+never loads or processes audio. One authoritative manifest owns `file_id`,
+`label`, and `fold`. Requested detector tables are joined strictly by
+`file_id`: missing rows, extra rows, duplicate IDs or columns, nonnumeric
+features, and nonfinite values are errors. Feature values are not silently
+filled, dropped, imputed, or globally normalized.
+
+`build_feature_table` accepts whichever detector sources are ready, so CPPS and
+splice features can be evaluated before RFP or WavLM scores exist. Labels are
+canonicalized to `0 = bona fide/real` and `1 = spoof/synthetic`. Source and
+column order determine a stable feature-column order.
+
+Two fixed baselines are available:
+
+- L2-regularized logistic regression with `StandardScaler` inside each
+  fold-local training pipeline.
+- A small, strongly regularized LightGBM classifier with fixed parameters and
+  deterministic single-threaded execution.
+
+Both produce a held-out class-1 probability, so higher scores mean more
+synthetic. `cross_validate_fusion` honors the manifest's existing folds,
+concatenates one held-out prediction per file in original order, and passes the
+complete score vector to `evaluation.min_dcf.evaluate_min_dcf`. Its result is
+explicitly labeled an **OOF stacking diagnostic**. Feature subsets can be
+selected explicitly, and LightGBM gain importance is exposed for debugging;
+importance is not causal evidence and does not prove a feature improves
+held-out minDCF. These baseline hyperparameters have not been optimized.
+
+Learned base-detector scores, including WavLM classifiers and learned RFP
+fingerprints, must themselves be held-out/OOF: a detector must not score an
+example using a model or fingerprint trained on that example. Fixed CPPS and
+splice heuristics do not learn from labels and may be computed once per file.
+Ordinary OOF base scores are useful for development, but they are not the same
+as strict nested stacking. In a strict outer-fold evaluation, the outer
+validation fold must be excluded from every learned base-detector fit, and the
+fusion training meta-features must be generated entirely within the outer
+training set. The feature-table and fusion APIs are deliberately separate so
+outer-fold-specific tables can be supplied later without changing either
+contract.
+
+The eventual final-test flow is: train selected learned detectors on the
+appropriate full training data, score the NSA test files, compute fixed
+CPPS/splice features, build the same strict test feature table, and apply the
+final trained fusion model. The final fitting procedure remains a team decision
+until validation methodology is settled.
