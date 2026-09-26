@@ -1,1 +1,4 @@
+numpy
 praat-parselmouth==0.4.7
+PyWavelets==1.10.0
+scipy

@@ -48,3 +48,23 @@ freeze that direction, and evaluate held-out scores with
 
 The tested dependency is pinned as `praat-parselmouth==0.4.7`, which bundled
 Praat 6.1.38 in the validation environment.
+
+## Splice analysis
+
+`DetectSplices.detect_splices` accepts an already-prepared, finite, mono 16 kHz
+waveform. It does not decode, resample, downmix, normalize loudness, or convert
+audio files. The detector uses wavelet-packet discontinuity features for
+timbre, level, transients, and frequency, and returns candidate times plus
+continuous clip-level features.
+
+`splice_features` exposes fusion-ready values, including `splice_max_score`,
+candidate count, and the four channel maxima. `splice_max_score` is the initial
+standalone score because it retains continuous evidence; candidate count is not
+the primary score. Higher scores are expected to mean more suspicious, but that
+orientation must be confirmed and frozen using training data before evaluating
+with `evaluation.min_dcf.evaluate_min_dcf`.
+
+Splice analysis is supporting evidence for partial edits such as word
+replacement, cut-and-paste joins, or abrupt scene/background changes. A fully
+synthetic clip may contain no splice, so a low splice score is not proof that a
+clip is bona fide.
