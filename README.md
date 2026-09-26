@@ -32,3 +32,19 @@ python -m evaluation.evaluate_scores \
 
 Use `--delimiter comma` for CSV input. Labels must be exactly `bonafide` or
 `spoof`; predictions and labels are joined by file ID rather than row position.
+
+## CPPS feature
+
+`HarmonicAnalysis.compute_cpps` extracts one whole-clip smoothed cepstral peak
+prominence (CPPS) scalar. Its input must already be a decoded, finite,
+non-silent, mono 16 kHz waveform. The extractor does not decode, resample,
+downmix, normalize, pad, or crop audio.
+
+CPPS is an acoustic feature, not a synthetic probability. Choose whether
+`+CPPS` or `-CPPS` is the synthetic-oriented score using training data only,
+freeze that direction, and evaluate held-out scores with
+`evaluation.min_dcf.evaluate_min_dcf`. CPPS values do not need to be mapped to
+`[0, 1]` for minDCF evaluation.
+
+The tested dependency is pinned as `praat-parselmouth==0.4.7`, which bundled
+Praat 6.1.38 in the validation environment.
