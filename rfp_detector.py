@@ -5,9 +5,9 @@ Based on: "Lightweight Model Attribution and Detection of Synthetic Speech
 via Audio Residual Fingerprints" (Pizarro et al., 2024)
 
 Pipeline:
-  1. Build spectral fingerprint per generator from training data
-  2. For each test file, compute min Mahalanobis distance to any generator
-  3. Lower distance = closer to known generator = more likely synthetic
+  1. Build spectral fingerprints for both real and fake sources
+  2. For each test file, compute min Mahalanobis distance to real vs fake
+  3. Score = d_real / (d_real + d_fake): 0 = real, 1 = synthetic
 """
 
 import numpy as np
@@ -75,9 +75,11 @@ class RFPDetector:
         self.filter_type = filter_type
         self.fingerprints = {}
         self.cov_invs = {}
+        self.real_keys = set()
+        self.fake_keys = set()
 
-    def build_fingerprint(self, gen_name, file_paths, max_n=500):
-        """Build fingerprint for one generator from audio files."""
+    def build_fingerprint(self, gen_name, file_paths, max_n=500, is_real=False):
+        """Build fingerprint for one source (real or fake) from audio files."""
         paths = list(file_paths)
         if len(paths) > max_n:
             paths = random.Random(42).sample(paths, max_n)
@@ -97,22 +99,37 @@ class RFPDetector:
         cov = np.cov(residuals, rowvar=False)
         cov += np.eye(cov.shape[0]) * 1e-6
         self.cov_invs[gen_name] = np.linalg.inv(cov)
-        print(f"  {gen_name}: fingerprint from {len(residuals)} samples")
+
+        if is_real:
+            self.real_keys.add(gen_name)
+        else:
+            self.fake_keys.add(gen_name)
+        print(f"  {gen_name}: fingerprint from {len(residuals)} samples ({'real' if is_real else 'fake'})")
 
     def mahalanobis(self, residual, gen_name):
         diff = residual - self.fingerprints[gen_name]
         return float(np.sqrt(np.clip(diff @ self.cov_invs[gen_name] @ diff, 0, None)))
 
     def score_waveform(self, wav):
-        """Min Mahalanobis distance to any generator.
-        Lower = more likely synthetic."""
+        """Relative distance score: d_real / (d_real + d_fake).
+        0 = closer to real, 1 = closer to fake."""
         r = compute_residual(wav, self.fir)
-        return min(self.mahalanobis(r, g) for g in self.fingerprints)
+        d_real = min(self.mahalanobis(r, g) for g in self.real_keys) if self.real_keys else float('inf')
+        d_fake = min(self.mahalanobis(r, g) for g in self.fake_keys) if self.fake_keys else float('inf')
+        if d_real + d_fake == 0:
+            return 0.5
+        return d_real / (d_real + d_fake)
 
     def score_waveform_detailed(self, wav):
-        """Return distance to each generator."""
+        """Return distance to each fingerprint, plus the final score."""
         r = compute_residual(wav, self.fir)
-        return {g: self.mahalanobis(r, g) for g in self.fingerprints}
+        dists = {g: self.mahalanobis(r, g) for g in self.fingerprints}
+        d_real = min(dists[g] for g in self.real_keys) if self.real_keys else float('inf')
+        d_fake = min(dists[g] for g in self.fake_keys) if self.fake_keys else float('inf')
+        dists['_d_real'] = d_real
+        dists['_d_fake'] = d_fake
+        dists['_score'] = d_real / (d_real + d_fake) if (d_real + d_fake) > 0 else 0.5
+        return dists
 
     def save(self, path):
         with open(path, 'wb') as f:
@@ -120,6 +137,8 @@ class RFPDetector:
                 'filter_type': self.filter_type,
                 'fingerprints': self.fingerprints,
                 'cov_invs': self.cov_invs,
+                'real_keys': self.real_keys,
+                'fake_keys': self.fake_keys,
             }, f)
 
     def load(self, path):
@@ -127,36 +146,54 @@ class RFPDetector:
             data = pickle.load(f)
         self.fingerprints = data['fingerprints']
         self.cov_invs = data['cov_invs']
+        self.real_keys = data.get('real_keys', set())
+        self.fake_keys = data.get('fake_keys', set())
 
 
 # --- Pipeline ---
 
 def build_from_manifest(manifest_path=MANIFEST_PATH, n_per_gen=500,
                         filter_type='lowpass'):
-    """Read manifest, sample files per generator, build fingerprints."""
+    """Read manifest, build fingerprints for both real and fake sources."""
     with open(manifest_path, 'r', encoding='utf-8') as f:
         rows = list(csv.DictReader(f))
 
-    gen_files = {}
+    fake_files = {}
+    real_lj = []
+    real_libri = []
+
     for r in rows:
         if r['label'] == 'spoof':
-            gen_files.setdefault(r['generator'], []).append(r['path'])
+            fake_files.setdefault(r['generator'], []).append(r['path'])
+        elif r['label'] == 'bonafide':
+            if r['speaker'].startswith('libri_'):
+                real_libri.append(r['path'])
+            else:
+                real_lj.append(r['path'])
 
     detector = RFPDetector(filter_type=filter_type)
     t0 = time.time()
 
-    for gen_name in sorted(gen_files):
-        print(f"Building fingerprint: {gen_name} "
-              f"({len(gen_files[gen_name])} files, sampling {n_per_gen})...")
-        detector.build_fingerprint(gen_name, gen_files[gen_name], max_n=n_per_gen)
+    print(f"Building real fingerprints...")
+    print(f"  real_lj: {len(real_lj)} files, sampling {n_per_gen}")
+    detector.build_fingerprint('real_lj', real_lj, max_n=n_per_gen, is_real=True)
+    print(f"  real_libri: {len(real_libri)} files, sampling {n_per_gen}")
+    detector.build_fingerprint('real_libri', real_libri, max_n=n_per_gen, is_real=True)
+
+    print(f"\nBuilding fake fingerprints...")
+    for gen_name in sorted(fake_files):
+        print(f"  {gen_name}: {len(fake_files[gen_name])} files, sampling {n_per_gen}")
+        detector.build_fingerprint(gen_name, fake_files[gen_name], max_n=n_per_gen, is_real=False)
 
     elapsed = time.time() - t0
     print(f"\nAll fingerprints built in {elapsed:.1f}s")
+    print(f"Real fingerprints: {sorted(detector.real_keys)}")
+    print(f"Fake fingerprints: {sorted(detector.fake_keys)}")
     return detector
 
 
 def score_files(detector, file_paths):
-    """Score a list of files. Returns {filename: min_mahal_distance}."""
+    """Score a list of files. Returns {filename: cm_score} where 0=real, 1=fake."""
     results = {}
     t0 = time.time()
 
@@ -167,7 +204,7 @@ def score_files(detector, file_paths):
             results[p.name] = detector.score_waveform(wav)
         except Exception as e:
             print(f"  Error scoring {p.name}: {e}")
-            results[p.name] = float('nan')
+            results[p.name] = 0.5
 
         if (i + 1) % 100 == 0:
             elapsed = time.time() - t0
@@ -177,18 +214,6 @@ def score_files(detector, file_paths):
                   f"({rate:.1f} files/s, ~{remaining:.0f}s remaining)")
 
     return results
-
-
-def distances_to_scores(distances):
-    """Convert Mahalanobis distances to cm-scores (0=real, 1=synthetic).
-    Lower distance → higher score (more synthetic)."""
-    scores = {}
-    for name, dist in distances.items():
-        if np.isnan(dist):
-            scores[name] = 0.5
-        else:
-            scores[name] = 1.0 / (1.0 + dist)
-    return scores
 
 
 def write_tsv(scores, output_path):
@@ -201,7 +226,7 @@ def write_tsv(scores, output_path):
 
 
 def evaluate_on_manifest(detector, manifest_path=MANIFEST_PATH, fold=0):
-    """Evaluate detector on a validation fold. Returns distances and labels."""
+    """Evaluate detector on a validation fold. Returns scores (0=real,1=fake) and labels."""
     with open(manifest_path, 'r', encoding='utf-8') as f:
         rows = list(csv.DictReader(f))
 
@@ -210,7 +235,7 @@ def evaluate_on_manifest(detector, manifest_path=MANIFEST_PATH, fold=0):
           f"({sum(1 for r in val_rows if r['label']=='bonafide')} real, "
           f"{sum(1 for r in val_rows if r['label']=='spoof')} spoof)")
 
-    distances = {}
+    scores = {}
     labels = {}
     t0 = time.time()
 
@@ -218,7 +243,7 @@ def evaluate_on_manifest(detector, manifest_path=MANIFEST_PATH, fold=0):
         p = Path(r['path'])
         try:
             wav, _ = load_audio(str(p))
-            distances[p.name] = detector.score_waveform(wav)
+            scores[p.name] = detector.score_waveform(wav)
             labels[p.name] = r['label']
         except Exception as e:
             print(f"  skip {p.name}: {e}")
@@ -227,41 +252,40 @@ def evaluate_on_manifest(detector, manifest_path=MANIFEST_PATH, fold=0):
             elapsed = time.time() - t0
             print(f"  {i+1}/{len(val_rows)} ({(i+1)/elapsed:.1f} files/s)")
 
-    return distances, labels
+    return scores, labels
 
 
 # --- Main ---
 
 if __name__ == '__main__':
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file = CACHE_DIR / "rfp_lowpass.pkl"
+    cache_file = CACHE_DIR / "rfp_v2.pkl"
 
-    # Step 1: Build or load fingerprints
+    # Step 1: Build or load fingerprints (real + fake)
     if cache_file.exists():
         print(f"Loading cached fingerprints from {cache_file}...")
         detector = RFPDetector(filter_type='lowpass')
         detector.load(str(cache_file))
-        print(f"Loaded fingerprints for: {sorted(detector.fingerprints.keys())}")
+        print(f"Real: {sorted(detector.real_keys)}")
+        print(f"Fake: {sorted(detector.fake_keys)}")
     else:
-        print("Building fingerprints from manifest...")
+        print("Building fingerprints from manifest (real + fake)...")
         detector = build_from_manifest(n_per_gen=500, filter_type='lowpass')
         detector.save(str(cache_file))
         print(f"Saved to {cache_file}")
 
-    # Step 2: Score test files
+    # Step 2: Score test files (scores are already 0=real, 1=fake)
     test_files = sorted(TEST_DIR.glob("*.wav"))
     print(f"\nScoring {len(test_files)} test files...")
-    distances = score_files(detector, test_files)
+    scores = score_files(detector, test_files)
 
-    # Step 3: Convert to cm-scores and write TSV
-    scores = distances_to_scores(distances)
-    output_tsv = CACHE_DIR / "rfp_submission.tsv"
+    # Step 3: Write TSV
+    output_tsv = CACHE_DIR / "rfp_v2_submission.tsv"
     write_tsv(scores, output_tsv)
 
-    # Print distance statistics
-    dists = [d for d in distances.values() if not np.isnan(d)]
-    print(f"\nDistance stats: min={min(dists):.2f}, max={max(dists):.2f}, "
-          f"median={np.median(dists):.2f}, mean={np.mean(dists):.2f}")
-    cm = list(scores.values())
-    print(f"Score stats: min={min(cm):.4f}, max={max(cm):.4f}, "
-          f"median={np.median(cm):.4f}")
+    # Print score statistics
+    vals = list(scores.values())
+    print(f"\nScore stats: min={min(vals):.4f}, max={max(vals):.4f}, "
+          f"median={np.median(vals):.4f}, mean={np.mean(vals):.4f}")
+    print(f"Files scoring > 0.5 (likely fake): {sum(1 for v in vals if v > 0.5)}")
+    print(f"Files scoring < 0.5 (likely real): {sum(1 for v in vals if v < 0.5)}")
