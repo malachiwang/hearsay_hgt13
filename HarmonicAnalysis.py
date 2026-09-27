@@ -125,8 +125,3 @@ def compute_cpps(
     if not np.isfinite(result):
         raise CPPSExtractionError("Praat returned a nonfinite CPPS value")
     return result
-#
-# from ProcessFiles import *
-# from pathlib import Path
-# for file in Path(input()).iterdir():
-#     print(compute_cpps(normalize_file(f"SmallTest/{file.name}"), 16000))
