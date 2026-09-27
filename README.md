@@ -82,6 +82,69 @@ The detector uses `eliya/forensics_0.3B_base_deepfake_classifier` with a
 same scores.
 **And this pipeline is in the branch called Himank**
 
+## Docker judging image
+
+> **For judges: run our detector reproducibly.** This image runs the
+> whole-clip `run_hearsay.py` pipeline (`eliya_top3_mean`) with no
+> configuration — build it, point it at the test directory, and it writes a
+> `filename` / `cm-score` TSV. Note this is an *improved* scoring path over the
+> original leaderboard submission (`forensics_infer.py`, first-5-seconds, on the
+> `himank` branch): it uses the same model but scores the whole clip, so its
+> per-file scores differ from `forensics_submission.tsv`.
+
+The judging image uses the same `run_hearsay.py INPUT_DIRECTORY OUTPUT_TSV`
+interface described above. It recursively scores the runner's seven supported
+extensions and writes the exact `filename` / `cm-score` TSV. The current score
+is `eliya_top3_mean`, where larger values mean more likely synthetic. Grok is
+not invoked by this judging path.
+
+Build the CPU-capable image from the repository root:
+
+```bash
+docker build -t hearsay .
+```
+
+During `docker build`, the image runs `scripts/download_eliya.py` to download
+the five allowlisted Eliya files into the exact directory expected by
+`NewAttempt/Deepfake.py`, using `checkpoint_epoch_5.safetensors` rather than the
+legacy `.pt` checkpoint. It also caches the `microsoft/wavlm-large` backbone and
+runs `--verify-only` before completing the build. Model assets are therefore in
+the final image; they are not copied from the developer machine or tracked by
+Git.
+
+Run it with absolute host paths:
+
+```bash
+docker run --rm \
+  -v /absolute/path/to/test:/input:ro \
+  -v /absolute/path/to/output:/output \
+  hearsay \
+  /input \
+  /output/predictions.tsv
+```
+
+Inference is configured for offline Hugging Face operation. The same command
+works without model downloads at container startup. Verify this by adding
+`--network none` immediately after `docker run --rm`:
+
+```bash
+docker run --rm --network none \
+  -v /absolute/path/to/test:/input:ro \
+  -v /absolute/path/to/output:/output \
+  hearsay \
+  /input \
+  /output/predictions_offline.tsv
+```
+
+For an explicitly x86-64 judging target, build a separate image with:
+
+```bash
+docker build --platform linux/amd64 -t hearsay-amd64 .
+```
+
+Use that option only when the judging platform requires `linux/amd64`; native
+builds avoid emulation overhead during local development.
+
 ## HEARSAY evaluation
 
 The canonical evaluator is `evaluation.min_dcf.evaluate_min_dcf`. It uses the
@@ -377,61 +440,6 @@ prints and preserves the detector result and reports that the optional Grok
 interpretation is unavailable. Detector scores are evidence, not guaranteed
 calibrated probabilities, and the Grok prompt explicitly prohibits inventing
 missing signals or confidence estimates.
-
-## Docker judging image
-
-The judging image uses the same `run_hearsay.py INPUT_DIRECTORY OUTPUT_TSV`
-interface described above. It recursively scores the runner's seven supported
-extensions and writes the exact `filename` / `cm-score` TSV. The current score
-is `eliya_top3_mean`, where larger values mean more likely synthetic. Grok is
-not invoked by this judging path.
-
-Build the CPU-capable image from the repository root:
-
-```bash
-docker build -t hearsay .
-```
-
-During `docker build`, the image runs `scripts/download_eliya.py` to download
-the five allowlisted Eliya files into the exact directory expected by
-`NewAttempt/Deepfake.py`, using `checkpoint_epoch_5.safetensors` rather than the
-legacy `.pt` checkpoint. It also caches the `microsoft/wavlm-large` backbone and
-runs `--verify-only` before completing the build. Model assets are therefore in
-the final image; they are not copied from the developer machine or tracked by
-Git.
-
-Run it with absolute host paths:
-
-```bash
-docker run --rm \
-  -v /absolute/path/to/test:/input:ro \
-  -v /absolute/path/to/output:/output \
-  hearsay \
-  /input \
-  /output/predictions.tsv
-```
-
-Inference is configured for offline Hugging Face operation. The same command
-works without model downloads at container startup. Verify this by adding
-`--network none` immediately after `docker run --rm`:
-
-```bash
-docker run --rm --network none \
-  -v /absolute/path/to/test:/input:ro \
-  -v /absolute/path/to/output:/output \
-  hearsay \
-  /input \
-  /output/predictions_offline.tsv
-```
-
-For an explicitly x86-64 judging target, build a separate image with:
-
-```bash
-docker build --platform linux/amd64 -t hearsay-amd64 .
-```
-
-Use that option only when the judging platform requires `linux/amd64`; native
-builds avoid emulation overhead during local development.
 
 ## Run tests
 
