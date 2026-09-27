@@ -28,6 +28,60 @@ The download step requires network access. After it finishes, use
 `python scripts/download_eliya.py --verify-only` to verify the local Eliya and
 WavLM assets without downloading anything.
 
+## Final submission using GT PACE
+
+The final competition submission was generated on the Georgia Tech PACE ICE
+cluster using an NVIDIA H100 GPU. The scoring path is exactly the judging
+runner described above — `run_hearsay.py` driving the Eliya detector in
+`NewAttempt/Deepfake.py` — so the submitted `predictions.tsv` and the Docker
+judging image use the same code and produce the same `eliya_top3_mean` scores.
+
+**File used for scoring:** `run_hearsay.py` (entry point) →
+`NewAttempt/Deepfake.py` (`EliyaDetector`, whole-clip 5.0 s windows at a 0.5 s
+hop, `eliya_top3_mean` as the `cm-score`). No feature-engineering, fusion, or
+splice code participates in the final score.
+
+Steps:
+
+1. **On the PACE login node** (which has network access), set up the
+   environment and pre-download the model assets so the GPU job can run
+   offline:
+
+   ```bash
+   module load anaconda3 cuda
+   cd ~/scratch/hearsay_hgt13
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install -r requirements.txt
+   python scripts/download_eliya.py          # downloads Eliya + WavLM-large
+   python scripts/download_eliya.py --verify-only
+   ```
+
+2. **On a GPU compute node** (interactive session or batch job — never the
+   login node, since `torchcodec` needs CUDA), run the judging runner against
+   the test directory:
+
+   ```bash
+   source .venv/bin/activate
+   python run_hearsay.py \
+       ~/scratch/hearsay_test/HackGTHearsayTesting \
+       predictions.tsv
+   ```
+
+   Example interactive allocation:
+   `salloc --gres=gpu:H100:1 --mem-per-gpu=224G -t 1:00:00`
+
+3. `predictions.tsv` is the final submission — a header row (`filename` /
+   `cm-score`) followed by one row per test file, scores in `[0, 1]` where
+   higher means more synthetic. This is the file submitted to the competition
+   and the file the Docker image reproduces.
+
+The detector uses `eliya/forensics_0.3B_base_deepfake_classifier` with a
+`microsoft/wavlm-large` backbone; inference is deterministic (fixed weights,
+`eval()` mode, fixed windowing), so re-running the same test set reproduces the
+same scores.
+**And this pipeline is in the branch called Himank**
+
 ## HEARSAY evaluation
 
 The canonical evaluator is `evaluation.min_dcf.evaluate_min_dcf`. It uses the
