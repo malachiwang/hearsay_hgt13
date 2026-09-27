@@ -1,5 +1,27 @@
+# Large data and generated artifacts stay out of git
+data/
+test/
+cache/
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.wav
+*.flac
+*.mp3
+*.tar
+*.tar.gz
+*.tar.bz2
+
+# Python
 __pycache__/
-*.py[cod]
-.env
-.env.*
-!.env.example
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
