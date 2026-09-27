@@ -18,6 +18,7 @@ import argparse
 import csv
 import importlib.util
 import json
+import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -389,6 +390,20 @@ def main() -> None:
         help="number of five-second windows evaluated together (default: 4)",
     )
     parser.add_argument("--csv", help="optional path to write aggregate results")
+    parser.add_argument(
+        "--ask-grok",
+        nargs="?",
+        const=True,
+        metavar="QUESTION",
+        help=(
+            "ask Grok to interpret each completed HEARSAY analysis; optionally "
+            "provide a question (requires XAI_API_KEY)"
+        ),
+    )
+    parser.add_argument(
+        "--grok-model",
+        help="optional xAI model override (default: XAI_MODEL or grok-4.7)",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -418,6 +433,31 @@ def main() -> None:
             f"eliya_max={result['eliya_max']:.4f}  "
             f"windows={result['n_windows']}"
         )
+        if args.ask_grok:
+            from grok_interpretation import (
+                DEFAULT_GROK_QUESTION,
+                GrokError,
+                ask_grok_about_analysis,
+            )
+
+            question = DEFAULT_GROK_QUESTION if args.ask_grok is True else args.ask_grok
+            try:
+                interpretation = ask_grok_about_analysis(
+                    result,
+                    question,
+                    model=args.grok_model,
+                )
+            except GrokError as exc:
+                print(
+                    f"[GROK UNAVAILABLE] {audio_file.name}: {exc}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"\nGrok interpretation for {audio_file.name} "
+                    f"({interpretation.model}; not a detector result):\n"
+                    f"{interpretation.text}\n"
+                )
 
     if args.csv and rows:
         with Path(args.csv).open("w", newline="", encoding="utf-8") as handle:

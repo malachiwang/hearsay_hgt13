@@ -9,6 +9,8 @@ __pycache__/
 .venv/
 venv/
 *.log
+.env
+.env.*
 docker_test_out/
 model_cache/
 

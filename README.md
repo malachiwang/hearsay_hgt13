@@ -193,6 +193,33 @@ python NewAttempt/Deepfake.py audio.wav
 python NewAttempt/Deepfake.py audio_directory/ --csv eliya_scores.csv
 ```
 
+## Ask Grok about an analysis
+
+HEARSAY can optionally ask xAI's Grok to explain a completed detector result in
+plain language. Grok receives a structured, bounded summary containing the
+measured prediction and score, Eliya aggregate/window outputs, and any other
+detector outputs, suspicious characteristics, metadata, or disagreement that
+the caller actually supplied. It does not receive the audio, run a detector,
+change `eliya_top3_mean`, or participate in the judging TSV. The CLI labels its
+response as a natural-language interpretation rather than a detector result.
+
+Set the xAI key in the environment (never commit it), then use the existing
+Eliya CLI with `--ask-grok`:
+
+```bash
+export XAI_API_KEY="your-xai-api-key"
+python NewAttempt/Deepfake.py audio.wav --ask-grok
+python NewAttempt/Deepfake.py audio.wav \
+  --ask-grok "Which measured interval should I review first?"
+```
+
+The default model is `grok-4.7`; set `XAI_MODEL` or pass `--grok-model` to use
+another xAI model. If the key is absent or xAI is unavailable, HEARSAY still
+prints and preserves the detector result and reports that the optional Grok
+interpretation is unavailable. Detector scores are evidence, not guaranteed
+calibrated probabilities, and the Grok prompt explicitly prohibits inventing
+missing signals or confidence estimates.
+
 ## Docker judging image
 
 The judging image uses `run_hearsay.py` to score every supported audio file in
