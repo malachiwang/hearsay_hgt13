@@ -51,6 +51,11 @@ Praat 6.1.38 in the validation environment.
 
 ## Splice analysis
 
+HEARSAY has two complementary splice systems. Neither is a complete standalone
+deepfake detector.
+
+### Physical boundary detector
+
 `DetectSplices.detect_splices` accepts an already-prepared, finite, mono 16 kHz
 waveform. It does not decode, resample, downmix, normalize loudness, or convert
 audio files. The detector uses wavelet-packet discontinuity features for
@@ -68,6 +73,50 @@ Splice analysis is supporting evidence for partial edits such as word
 replacement, cut-and-paste joins, or abrupt scene/background changes. A fully
 synthetic clip may contain no splice, so a low splice score is not proof that a
 clip is bona fide.
+
+### Representation-novelty detector
+
+`NoveltySplice.detect_embedding_novelty` accepts precomputed short-window
+embeddings and their frame times. It L2-normalizes each embedding, constructs a
+cosine self-similarity matrix, and applies fixed short- and medium-context
+Gaussian checkerboard kernels. High novelty means the windows on each side of
+a boundary are internally consistent but the two sides differ. This is intended
+to complement the physical detector when a partial synthetic substitution is
+cross-faded or otherwise lacks a sharp waveform seam.
+
+The expected upstream WavLM windowing baseline is configurable. The novelty
+module documents initial constants of 0.8-second windows and 0.2-second hops,
+within the intended 0.8--1.0 and 0.20--0.25 second ranges. Johnny's WavLM
+integration should provide:
+
+```text
+get_window_embeddings(waveform, sample_rate, window_sec, hop_sec)
+    -> embeddings      # shape (N, D)
+    -> frame_times     # shape (N,)
+    -> local_fake_scores (optional, shape (N,))
+```
+
+The novelty module does not import, download, train, or run WavLM. Prefer an
+anti-spoof/deepfake-sensitive intermediate representation when one is exposed.
+Generic WavLM embeddings also encode speaker, phonetic, linguistic, and
+acoustic content, so ordinary speech changes can produce novelty and must be
+validated on bona fide speech.
+
+`novelty_splice_features` returns `splice_novelty_max`, top-three mean, p95,
+and peak count for the generic fusion table. Optional local fake scores add
+`local_wavlm_fake_max`, minimum, range, maximum adjacent jump, and p90. No
+absolute boundary time is used as a classifier feature. The detailed result
+retains multiscale curves and candidate times for diagnosis. The fixed peak
+gate is only a conservative debugging aid; continuous novelty statistics are
+the primary outputs, and no competition threshold was tuned in this ticket.
+
+Low novelty is not bona fide proof: a fully synthetic clip may be internally
+consistent. High novelty is also not proof of manipulation because speaker,
+recording, or acoustic scene changes can create real boundaries. These are
+supporting partial-manipulation signals whose value must be measured through
+the existing fusion and NSA minDCF pipeline. The descriptive helper in
+`evaluation.analyze_splice_features` compares label-grouped novelty and
+optional physical-splice distributions without training or choosing thresholds.
 
 ## Fusion
 
