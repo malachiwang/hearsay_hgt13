@@ -1,5 +1,33 @@
 # HEARSAY - HackGT 13
 
+## Current runnable path
+
+The current end-to-end judging path is the Eliya/WavLM detector in
+`NewAttempt/Deepfake.py`. `run_hearsay.py` applies that detector to an input
+directory and writes synthetic-oriented scores for judging. Grok is an optional
+post-analysis explanation layer; it does not participate in detection or
+judging.
+
+### Quick start from a fresh clone
+
+The model assets are downloaded from Hugging Face and are not stored in Git.
+A working FFmpeg installation is also needed locally for formats that require
+it; the Docker image installs FFmpeg and `libsndfile1` itself.
+
+```bash
+git clone https://github.com/malachiwang/hearsay_hgt13.git
+cd hearsay_hgt13
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python scripts/download_eliya.py
+python NewAttempt/Deepfake.py /path/to/audio.wav
+```
+
+The download step requires network access. After it finishes, use
+`python scripts/download_eliya.py --verify-only` to verify the local Eliya and
+WavLM assets without downloading anything.
+
 ## HEARSAY evaluation
 
 The canonical evaluator is `evaluation.min_dcf.evaluate_min_dcf`. It uses the
@@ -169,22 +197,27 @@ until validation methodology is settled.
 ## Eliya detector
 
 `NewAttempt/Deepfake.py` wraps
-`eliya/forensics_0.3B_base_deepfake_classifier` in process. It loads the
-upstream `model.py` architecture and `checkpoint_epoch_5.safetensors` once;
-the pickled `checkpoint_epoch_5.pt` is never requested. Each audio file is
-decoded once, prepared using the upstream mono/16 kHz/amplitude policy, and
-covered by 5.0-second windows at a 0.5-second hop. A unique end-anchored window
-is added when regular stepping does not reach the file end. Clips shorter than
-five seconds produce one upstream-style repeat-padded model input.
+`eliya/forensics_0.3B_base_deepfake_classifier` in process. The upstream model
+uses `microsoft/wavlm-large` as its WavLM backbone. HEARSAY loads the upstream
+`model.py` architecture and `checkpoint_epoch_5.safetensors` once per detector
+process; the legacy pickled `checkpoint_epoch_5.pt` is neither requested nor
+used.
 
-Window batches share the already-loaded model. The upstream sigmoid output is
-the bona-fide probability, so each HEARSAY window score is
-`1 - sigmoid(logit)`, with larger values meaning more synthetic. The current
-main Eliya score is `eliya_top3_mean`; mean, maximum, p90, high-window fraction,
-and all window records are also retained for later fusion. The configurable
-threshold affects only the diagnostic high-window fraction and backward-
-compatible diagnostic verdict—it does not threshold or replace the continuous
-HEARSAY score.
+Each file is decoded once. Multichannel audio is averaged to mono, audio not
+already at 16 kHz is resampled to 16 kHz, and the upstream amplitude preparation
+is applied. The complete clip is then covered by 5.0-second windows with a
+0.5-second hop. A unique end-anchored window is added when regular stepping does
+not reach the file end. A clip shorter than five seconds produces one window by
+repeating its samples to the required length rather than zero-padding.
+
+Inference is batched (default batch size: 4), and all batches share the same
+already-loaded model. The upstream logit is bona-fide-oriented, so HEARSAY uses
+`1 - sigmoid(logit)` for each synthetic-oriented window score: `0` means more
+bona fide and `1` means more synthetic. The current primary file score is
+`eliya_top3_mean`. The mean, maximum, p90, high-window fraction, and individual
+window records are also retained for later analysis or fusion. The configurable
+threshold affects only the diagnostic high-window fraction and legacy verdict;
+it does not replace the continuous score.
 
 Run a file or directory with:
 
@@ -193,14 +226,84 @@ python NewAttempt/Deepfake.py audio.wav
 python NewAttempt/Deepfake.py audio_directory/ --csv eliya_scores.csv
 ```
 
+Directory discovery is recursive and supports `.wav`, `.mp3`, `.flac`, `.m4a`,
+`.ogg`, and `.opus`, case-insensitively.
+
+## Model asset setup
+
+The recommended explicit setup command is:
+
+```bash
+python scripts/download_eliya.py
+```
+
+It downloads only the required Eliya repository files into
+`NewAttempt/models/forensics_0.3B_base_deepfake_classifier`:
+
+- `checkpoint_epoch_5.safetensors`
+- `inference.py`
+- `model.py`
+- `config.json`
+- `requirements.txt`
+
+It also downloads the required `microsoft/wavlm-large` configuration and model
+weights into the Hugging Face cache. This reconstructs the model dependencies
+for a fresh clone without committing large weights to Git. Direct detector
+startup can fetch missing Eliya repository files automatically, but the setup
+script is preferred because it also prepares and validates the WavLM cache.
+
+To check existing assets without allowing a download:
+
+```bash
+python scripts/download_eliya.py --verify-only
+```
+
+The verification command fails if the allowlisted Eliya files or cached WavLM
+files are incomplete, if an unexpected file is present in the Eliya model
+directory, or if the legacy `.pt` checkpoint is present.
+
+## Testing with audio
+
+The detector needs a real supported audio file or a directory containing such
+files; this repository does not bundle a labeled audio test dataset. The Eliya
+directory CLI supports `.wav`, `.mp3`, `.flac`, `.m4a`, `.ogg`, and `.opus`.
+The judging runner also accepts `.mp4` audio containers. Actual decode support
+depends on the installed TorchAudio/TorchCodec and FFmpeg stack.
+
+Optionally, an external labeled corpus such as ASVspoof or DeepVoice can be
+used for sanity testing, but HEARSAY does not download or depend on either
+dataset.
+
+## Judging runner
+
+Run the non-Docker judging entry point with an input directory and output TSV:
+
+```bash
+python run_hearsay.py /path/to/input_audio /path/to/predictions.tsv
+```
+
+`run_hearsay.py` recursively discovers `.wav`, `.mp3`, `.m4a`, `.mp4`, `.ogg`,
+`.opus`, and `.flac` files in deterministic order. It loads one Eliya detector,
+scores every file, and writes exactly these tab-separated columns:
+
+```text
+filename	cm-score
+```
+
+The current `cm-score` is `eliya_top3_mean`, is finite and bounded to `[0, 1]`,
+and is oriented so a higher value means more synthetic. The runner writes one
+row per successfully processed input file. If any file fails, it reports an
+error, exits nonzero, and does not leave a partial output file.
+
 ## Ask Grok about an analysis
 
 HEARSAY can optionally ask xAI's Grok to explain a completed detector result in
-plain language. Grok receives a structured, bounded summary containing the
-measured prediction and score, Eliya aggregate/window outputs, and any other
-detector outputs, suspicious characteristics, metadata, or disagreement that
-the caller actually supplied. It does not receive the audio, run a detector,
-change `eliya_top3_mean`, or participate in the judging TSV. The CLI labels its
+plain language through `POST https://api.x.ai/v1/responses`. Grok receives a
+structured, bounded summary containing the measured prediction and score,
+Eliya aggregate and strongest-window outputs, and any other detector outputs,
+suspicious characteristics, metadata, or disagreement actually supplied by
+HEARSAY. It does not receive raw audio, run a detector, change
+`eliya_top3_mean`, or participate in the judging TSV. The CLI labels its
 response as a natural-language interpretation rather than a detector result.
 
 Set the xAI key in the environment (never commit it), then use the existing
@@ -213,8 +316,9 @@ python NewAttempt/Deepfake.py audio.wav \
   --ask-grok "Which measured interval should I review first?"
 ```
 
-The default model is `grok-4.7`; set `XAI_MODEL` or pass `--grok-model` to use
-another xAI model. If the key is absent or xAI is unavailable, HEARSAY still
+The API key is read only from `XAI_API_KEY`. The default model is `grok-4.7`;
+set `XAI_MODEL` or pass `--grok-model MODEL_NAME` to override it. If no API key
+is configured, or if xAI rejects or cannot complete the request, HEARSAY still
 prints and preserves the detector result and reports that the optional Grok
 interpretation is unavailable. Detector scores are evidence, not guaranteed
 calibrated probabilities, and the Grok prompt explicitly prohibits inventing
@@ -222,10 +326,11 @@ missing signals or confidence estimates.
 
 ## Docker judging image
 
-The judging image uses `run_hearsay.py` to score every supported audio file in
-an input directory and write an exact two-column `filename` / `cm-score` TSV.
-The current score is `eliya_top3_mean`, where larger values mean more likely
-synthetic.
+The judging image uses the same `run_hearsay.py INPUT_DIRECTORY OUTPUT_TSV`
+interface described above. It recursively scores the runner's seven supported
+extensions and writes the exact `filename` / `cm-score` TSV. The current score
+is `eliya_top3_mean`, where larger values mean more likely synthetic. Grok is
+not invoked by this judging path.
 
 Build the CPU-capable image from the repository root:
 
@@ -233,12 +338,13 @@ Build the CPU-capable image from the repository root:
 docker build -t hearsay .
 ```
 
-The build downloads the five allowlisted Eliya files into the exact directory
-expected by `NewAttempt/Deepfake.py`, using
-`checkpoint_epoch_5.safetensors` rather than the legacy `.pt` checkpoint. It
-also caches the upstream `microsoft/wavlm-large` backbone required by Eliya's
-`model.py`. Model weights are therefore part of the final image and are not
-copied from the developer machine or tracked by Git.
+During `docker build`, the image runs `scripts/download_eliya.py` to download
+the five allowlisted Eliya files into the exact directory expected by
+`NewAttempt/Deepfake.py`, using `checkpoint_epoch_5.safetensors` rather than the
+legacy `.pt` checkpoint. It also caches the `microsoft/wavlm-large` backbone and
+runs `--verify-only` before completing the build. Model assets are therefore in
+the final image; they are not copied from the developer machine or tracked by
+Git.
 
 Run it with absolute host paths:
 
@@ -252,8 +358,8 @@ docker run --rm \
 ```
 
 Inference is configured for offline Hugging Face operation. The same command
-can be checked without network access by adding `--network none` immediately
-after `docker run --rm`:
+works without model downloads at container startup. Verify this by adding
+`--network none` immediately after `docker run --rm`:
 
 ```bash
 docker run --rm --network none \
@@ -272,3 +378,25 @@ docker build --platform linux/amd64 -t hearsay-amd64 .
 
 Use that option only when the judging platform requires `linux/amd64`; native
 builds avoid emulation overhead during local development.
+
+## Run tests
+
+The repository uses pytest. It is a test-only tool and is not currently listed
+in `requirements.txt`, so install it in the active environment if necessary:
+
+```bash
+python -m pip install pytest
+python -m pytest -q
+```
+
+To run only the tests for the recent detector, Grok, and judging-runner work:
+
+```bash
+python -m pytest -q \
+  tests/test_deepfake.py \
+  tests/test_grok_interpretation.py \
+  tests/test_run_hearsay.py
+```
+
+These unit tests use mocked neural-model and xAI responses. They do not require
+the large model download, a labeled audio dataset, or an `XAI_API_KEY`.
