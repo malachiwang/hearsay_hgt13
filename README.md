@@ -165,3 +165,83 @@ appropriate full training data, score the NSA test files, compute fixed
 CPPS/splice features, build the same strict test feature table, and apply the
 final trained fusion model. The final fitting procedure remains a team decision
 until validation methodology is settled.
+
+## Eliya detector
+
+`NewAttempt/Deepfake.py` wraps
+`eliya/forensics_0.3B_base_deepfake_classifier` in process. It loads the
+upstream `model.py` architecture and `checkpoint_epoch_5.safetensors` once;
+the pickled `checkpoint_epoch_5.pt` is never requested. Each audio file is
+decoded once, prepared using the upstream mono/16 kHz/amplitude policy, and
+covered by 5.0-second windows at a 0.5-second hop. A unique end-anchored window
+is added when regular stepping does not reach the file end. Clips shorter than
+five seconds produce one upstream-style repeat-padded model input.
+
+Window batches share the already-loaded model. The upstream sigmoid output is
+the bona-fide probability, so each HEARSAY window score is
+`1 - sigmoid(logit)`, with larger values meaning more synthetic. The current
+main Eliya score is `eliya_top3_mean`; mean, maximum, p90, high-window fraction,
+and all window records are also retained for later fusion. The configurable
+threshold affects only the diagnostic high-window fraction and backward-
+compatible diagnostic verdict—it does not threshold or replace the continuous
+HEARSAY score.
+
+Run a file or directory with:
+
+```bash
+python NewAttempt/Deepfake.py audio.wav
+python NewAttempt/Deepfake.py audio_directory/ --csv eliya_scores.csv
+```
+
+## Docker judging image
+
+The judging image uses `run_hearsay.py` to score every supported audio file in
+an input directory and write an exact two-column `filename` / `cm-score` TSV.
+The current score is `eliya_top3_mean`, where larger values mean more likely
+synthetic.
+
+Build the CPU-capable image from the repository root:
+
+```bash
+docker build -t hearsay .
+```
+
+The build downloads the five allowlisted Eliya files into the exact directory
+expected by `NewAttempt/Deepfake.py`, using
+`checkpoint_epoch_5.safetensors` rather than the legacy `.pt` checkpoint. It
+also caches the upstream `microsoft/wavlm-large` backbone required by Eliya's
+`model.py`. Model weights are therefore part of the final image and are not
+copied from the developer machine or tracked by Git.
+
+Run it with absolute host paths:
+
+```bash
+docker run --rm \
+  -v /absolute/path/to/test:/input:ro \
+  -v /absolute/path/to/output:/output \
+  hearsay \
+  /input \
+  /output/predictions.tsv
+```
+
+Inference is configured for offline Hugging Face operation. The same command
+can be checked without network access by adding `--network none` immediately
+after `docker run --rm`:
+
+```bash
+docker run --rm --network none \
+  -v /absolute/path/to/test:/input:ro \
+  -v /absolute/path/to/output:/output \
+  hearsay \
+  /input \
+  /output/predictions_offline.tsv
+```
+
+For an explicitly x86-64 judging target, build a separate image with:
+
+```bash
+docker build --platform linux/amd64 -t hearsay-amd64 .
+```
+
+Use that option only when the judging platform requires `linux/amd64`; native
+builds avoid emulation overhead during local development.

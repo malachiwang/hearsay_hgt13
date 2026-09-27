@@ -1,0 +1,21 @@
+.git
+.gitignore
+.DS_Store
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.log
+docker_test_out/
+model_cache/
+
+# The official assets are downloaded during docker build, never copied from a
+# developer machine or committed to Git.
+NewAttempt/models/
+**/*.pt
+**/*.pth
+**/*.safetensors
+**/*.bin
