@@ -1,14 +1,13 @@
-
-"""Locate splice discontinuities with a wavelet-packet scan.
+"""Locate splice discontinuities in an already-prepared mono waveform.
 
 A join of two different sounds is a step in the spectrum, the level, or the
 waveform. Pauses, slow pitch glides, and amplitude flutter are not. A candidate
 is kept only when the step is sharper than the same measurement on either side
 of it, both sides are audible, and a moving tonal peak does not explain it.
 
-PyWavelets supplies the ``sym4`` packet tree and the Haar detail used for
-clicks. Run this when an earlier pass reports multiple speaker-like regions or
-an abrupt spectral-level change.
+This module performs no decoding, resampling, downmixing, loudness
+normalization, padding/cropping of the source, or file conversion. PyWavelets
+supplies the ``sym4`` packet tree and the Haar detail used for clicks.
 """
 
 from __future__ import annotations
@@ -20,6 +19,9 @@ import pywt
 from scipy.ndimage import maximum_filter, median_filter
 from scipy.signal import find_peaks
 
+
+EXPECTED_SAMPLE_RATE_HZ = 16_000
+
 # A channel score of 1 is a clear hit. The candidate gate sits just under that.
 TIMBRE_SCORE_SCALE = 1.15
 LEVEL_SCORE_SCALE_DB = 7.0
@@ -28,6 +30,10 @@ TRANSIENT_SCORE_SCALE = 5.0
 FREQ_SCORE_SCALE_HZ = 90.0
 CANDIDATE_SCORE = 0.85
 PEAK_SHARE_TONAL = 0.55
+
+
+class SpliceDetectionError(ValueError):
+    """Raised when the splice detector input or output is invalid."""
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,45 @@ class SpliceResult:
         return len(self.candidates)
 
 
+def _validate_input(y: np.ndarray, sr: int) -> tuple[np.ndarray, int]:
+    if isinstance(sr, (bool, np.bool_)):
+        raise SpliceDetectionError("splice detection sample rate must be positive")
+    try:
+        sample_rate = int(sr)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise SpliceDetectionError("splice detection sample rate must be positive") from exc
+    if sample_rate <= 0:
+        raise SpliceDetectionError("splice detection sample rate must be positive")
+    if sample_rate != sr:
+        raise SpliceDetectionError("splice detection sample rate must be an integer")
+    if sample_rate != EXPECTED_SAMPLE_RATE_HZ:
+        raise SpliceDetectionError(
+            "HEARSAY splice detection requires 16 kHz audio; "
+            f"received {sample_rate} Hz"
+        )
+
+    try:
+        signal = np.asarray(y)
+    except (TypeError, ValueError) as exc:
+        raise SpliceDetectionError("splice waveform must be a numeric array") from exc
+    if signal.ndim != 1:
+        raise SpliceDetectionError(
+            "detect_splices requires a mono 1-D waveform; "
+            f"received shape {signal.shape}"
+        )
+    if signal.size == 0:
+        raise SpliceDetectionError("splice waveform must not be empty")
+    if not np.issubdtype(signal.dtype, np.number) or np.issubdtype(
+        signal.dtype, np.complexfloating
+    ):
+        raise SpliceDetectionError("splice waveform must contain real numeric samples")
+
+    signal = np.ascontiguousarray(signal, dtype=np.float64)
+    if not np.isfinite(signal).all():
+        raise SpliceDetectionError("splice waveform contains NaN or Inf")
+    return signal, sample_rate
+
+
 def detect_splices(
     y: np.ndarray,
     sr: int,
@@ -68,31 +113,42 @@ def detect_splices(
     hop_ms: float = 8.0,
     pad_ms: float = 220.0,
 ) -> SpliceResult:
-    """Scan mono ``y`` and return candidate splice times plus clip-level features.
+    """Return whole-clip discontinuity candidates and continuous features.
 
-    ``y`` is a float waveform already converted to mono. Keep the original file
-    for metadata; this function does not read containers.
+    ``y`` must be an already-prepared, finite, mono 16 kHz waveform. Near
+    silence is a valid safe result with no candidates and zero-valued features.
+    The detector does not mutate the caller's waveform.
     """
-    sr = int(sr)
-    if sr <= 0:
-        raise ValueError("sample rate must be positive")
-    signal = np.asarray(y, dtype=np.float64)
-    if signal.ndim != 1:
-        raise ValueError("detect_splices expects a mono 1-D array; mix to mono first")
-    duration = float(len(signal) / sr) if len(signal) else 0.0
-    if signal.size == 0 or not np.isfinite(signal).all():
-        return SpliceResult(sample_rate=sr, duration_sec=duration, note="empty or non-finite audio")
+
+    signal, sr = _validate_input(y, sr)
+    duration = float(signal.size / sr)
     signal = signal - float(np.mean(signal))
     peak = float(np.max(np.abs(signal)))
     if peak < 1e-8:
-        return SpliceResult(sample_rate=sr, duration_sec=duration, note="near-silent audio")
-    signal = signal / peak
+        return SpliceResult(
+            sample_rate=sr,
+            duration_sec=duration,
+            note="near-silent audio",
+        )
 
     level = choose_level(sr)
-    grouped = _packet_groups(signal, sr, wavelet=wavelet, level=level, pad_ms=pad_ms)
+    grouped = _packet_groups(
+        signal,
+        sr,
+        wavelet=wavelet,
+        level=level,
+        pad_ms=pad_ms,
+    )
     if grouped is None:
         return _too_short(sr, duration)
-    frame = _frame_views(grouped, sr, len(signal), win_ms=win_ms, guard_ms=guard_ms, hop_ms=hop_ms)
+    frame = _frame_views(
+        grouped,
+        sr,
+        len(signal),
+        win_ms=win_ms,
+        guard_ms=guard_ms,
+        hop_ms=hop_ms,
+    )
     if frame is None:
         return _too_short(sr, duration)
 
@@ -134,12 +190,39 @@ def detect_splices(
         max_transient_excess=_max(transient),
         max_freq_contrast_hz=_max(freq_hz),
         max_score=_max(score),
-        note=f"wavelet_packet {wavelet} L{level}; {grouped['n_groups']} log bands",
+        note=(
+            f"wavelet_packet {wavelet} L{level}; "
+            f"{grouped['n_groups']} log bands"
+        ),
     )
+
+
+def splice_features(y: np.ndarray, sr: int) -> dict[str, float]:
+    """Return finite fusion-ready clip-level splice features."""
+
+    result = detect_splices(y, sr)
+    features = {
+        "splice_max_score": float(result.max_score),
+        "splice_n_candidates": float(result.n_candidates),
+        "splice_max_timbre": float(result.max_timbre_contrast),
+        "splice_max_level_db": float(result.max_level_contrast_db),
+        "splice_max_transient": float(result.max_transient_excess),
+        "splice_max_frequency_hz": float(result.max_freq_contrast_hz),
+    }
+    if not all(np.isfinite(value) for value in features.values()):
+        raise SpliceDetectionError("splice detector produced nonfinite features")
+    return features
+
+
+def splice_score(y: np.ndarray, sr: int) -> float:
+    """Return the initial higher-is-more-suspicious standalone splice score."""
+
+    return splice_features(y, sr)["splice_max_score"]
 
 
 def choose_level(sr: int) -> int:
     """Packet depth whose linear bins are about 70 Hz wide."""
+
     level = int(round(np.log2(sr / 70.0) - 1.0))
     return int(np.clip(level, 5, 8))
 
@@ -158,7 +241,14 @@ def _max(values: np.ndarray) -> float:
     return float(np.max(values))
 
 
-def _packet_groups(y: np.ndarray, sr: int, *, wavelet: str, level: int, pad_ms: float) -> dict | None:
+def _packet_groups(
+    y: np.ndarray,
+    sr: int,
+    *,
+    wavelet: str,
+    level: int,
+    pad_ms: float,
+) -> dict | None:
     step = 2**level
     if len(y) < step * 8:
         return None
@@ -169,9 +259,16 @@ def _packet_groups(y: np.ndarray, sr: int, *, wavelet: str, level: int, pad_ms: 
     extra = (-len(padded)) % step
     if extra:
         padded = np.pad(padded, (0, extra), mode="edge")
-    packet = pywt.WaveletPacket(padded, wavelet=wavelet, mode="symmetric", maxlevel=level)
+    packet = pywt.WaveletPacket(
+        padded,
+        wavelet=wavelet,
+        mode="symmetric",
+        maxlevel=level,
+    )
     nodes = packet.get_level(level, order="freq")
-    linear = np.vstack([np.asarray(node.data, dtype=np.float64) ** 2 for node in nodes])
+    linear = np.vstack(
+        [np.asarray(node.data, dtype=np.float64) ** 2 for node in nodes]
+    )
     n_bins = linear.shape[0]
     n_groups = int(np.clip(n_bins // 6, 12, 24))
     edges = np.unique(np.geomspace(1, n_bins, n_groups + 1).astype(int))
@@ -189,7 +286,10 @@ def _packet_groups(y: np.ndarray, sr: int, *, wavelet: str, level: int, pad_ms: 
         centers.append(float(np.mean(bin_hz[start:edge])))
         start = int(edge)
     energy = np.vstack(groups)
-    csum = np.concatenate([np.zeros((energy.shape[0], 1)), np.cumsum(energy, axis=1)], axis=1)
+    csum = np.concatenate(
+        [np.zeros((energy.shape[0], 1)), np.cumsum(energy, axis=1)],
+        axis=1,
+    )
     return {
         "csum": csum,
         "centers_hz": np.asarray(centers, dtype=np.float64),
@@ -262,7 +362,11 @@ def _rms(y: np.ndarray, frame: dict, start_coef: np.ndarray) -> np.ndarray:
     n = len(y)
     energy = np.concatenate([[0.0], np.cumsum(y * y)])
     start = np.clip(start_coef * step - pad_n, 0, n).astype(int)
-    stop = np.clip((start_coef + frame["win"]) * step - pad_n, 0, n).astype(int)
+    stop = np.clip(
+        (start_coef + frame["win"]) * step - pad_n,
+        0,
+        n,
+    ).astype(int)
     width = np.maximum(1, stop - start)
     return np.sqrt(np.maximum(0.0, energy[stop] - energy[start]) / width)
 
@@ -273,6 +377,7 @@ def _power_gain(rms_a: np.ndarray, rms_b: np.ndarray) -> np.ndarray:
 
 def _timbre(left: np.ndarray, right: np.ndarray, gain: np.ndarray) -> np.ndarray:
     """Mean absolute log-energy residual after removing broadband gain."""
+
     eps = 1e-12
     peak = np.maximum(left.max(axis=0), right.max(axis=0)) + eps
     active = np.maximum(left, right) > (0.03 * peak)
@@ -282,11 +387,25 @@ def _timbre(left: np.ndarray, right: np.ndarray, gain: np.ndarray) -> np.ndarray
     return np.where(np.sum(active, axis=0) >= 2, mean, 0.0)
 
 
+def _shift_frequency_bins(values: np.ndarray, amount: int) -> np.ndarray:
+    """Shift one frequency vector without wrapping energy across its edges."""
+
+    shifted = np.zeros_like(values)
+    amount = int(amount)
+    if amount == 0:
+        shifted[...] = values
+    elif 0 < amount < values.shape[0]:
+        shifted[amount:] = values[:-amount]
+    elif -values.shape[0] < amount < 0:
+        shifted[:amount] = values[-amount:]
+    return shifted
+
+
 def _align_peak(reference: np.ndarray, other: np.ndarray) -> np.ndarray:
     shift = np.argmax(reference, axis=0) - np.argmax(other, axis=0)
     aligned = np.empty_like(other)
     for index, amount in enumerate(shift):
-        aligned[:, index] = np.roll(other[:, index], int(amount))
+        aligned[:, index] = _shift_frequency_bins(other[:, index], int(amount))
     return aligned
 
 
@@ -297,33 +416,60 @@ def _contrasts(y: np.ndarray, frame: dict) -> tuple[np.ndarray, np.ndarray]:
         "r1": _rms(y, frame, frame["r1"]),
         "r2": _rms(y, frame, frame["r2"]),
     }
-    across = _timbre(frame["e_l1"], frame["e_r1"], _power_gain(rms["l1"], rms["r1"]))
-    left = _timbre(frame["e_l0"], frame["e_l1"], _power_gain(rms["l0"], rms["l1"]))
-    right = _timbre(frame["e_r1"], frame["e_r2"], _power_gain(rms["r1"], rms["r2"]))
+    across = _timbre(
+        frame["e_l1"],
+        frame["e_r1"],
+        _power_gain(rms["l1"], rms["r1"]),
+    )
+    left = _timbre(
+        frame["e_l0"],
+        frame["e_l1"],
+        _power_gain(rms["l0"], rms["l1"]),
+    )
+    right = _timbre(
+        frame["e_r1"],
+        frame["e_r2"],
+        _power_gain(rms["r1"], rms["r2"]),
+    )
     raw = across - np.maximum(left, right)
 
     aligned_across = _timbre(
-        frame["e_l1"], _align_peak(frame["e_l1"], frame["e_r1"]), _power_gain(rms["l1"], rms["r1"])
+        frame["e_l1"],
+        _align_peak(frame["e_l1"], frame["e_r1"]),
+        _power_gain(rms["l1"], rms["r1"]),
     )
     aligned_left = _timbre(
-        frame["e_l0"], _align_peak(frame["e_l0"], frame["e_l1"]), _power_gain(rms["l0"], rms["l1"])
+        frame["e_l0"],
+        _align_peak(frame["e_l0"], frame["e_l1"]),
+        _power_gain(rms["l0"], rms["l1"]),
     )
     aligned_right = _timbre(
-        frame["e_r1"], _align_peak(frame["e_r1"], frame["e_r2"]), _power_gain(rms["r1"], rms["r2"])
+        frame["e_r1"],
+        _align_peak(frame["e_r1"], frame["e_r2"]),
+        _power_gain(rms["r1"], rms["r2"]),
     )
     aligned = aligned_across - np.maximum(aligned_left, aligned_right)
-    share_l = frame["e_l1"].max(axis=0) / (frame["e_l1"].sum(axis=0) + 1e-12)
-    share_r = frame["e_r1"].max(axis=0) / (frame["e_r1"].sum(axis=0) + 1e-12)
+    share_l = frame["e_l1"].max(axis=0) / (
+        frame["e_l1"].sum(axis=0) + 1e-12
+    )
+    share_r = frame["e_r1"].max(axis=0) / (
+        frame["e_r1"].sum(axis=0) + 1e-12
+    )
     tonal = (share_l > PEAK_SHARE_TONAL) & (share_r > PEAK_SHARE_TONAL)
     # A chirp's contrast collapses after the peak bin is lined up. A formant
     # or noise-color join does not, and noise is not tonal so it skips this.
-    explained = tonal & (aligned < 0.55) & (aligned < 0.5 * np.maximum(raw, 1e-6))
+    explained = tonal & (aligned < 0.55) & (
+        aligned < 0.5 * np.maximum(raw, 1e-6)
+    )
     timbre = np.where(explained, np.clip(aligned, 0.0, None), raw)
 
     def db(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         return np.abs(20.0 * np.log10((b + 1e-12) / (a + 1e-12)))
 
-    level = db(rms["l1"], rms["r1"]) - np.maximum(db(rms["l0"], rms["l1"]), db(rms["r1"], rms["r2"]))
+    level = db(rms["l1"], rms["r1"]) - np.maximum(
+        db(rms["l0"], rms["l1"]),
+        db(rms["r1"], rms["r2"]),
+    )
     return timbre, level
 
 
@@ -334,11 +480,15 @@ def _centroids(frame: dict) -> dict[str, np.ndarray]:
         weights = energy / (energy.sum(axis=0) + 1e-12)
         return hz @ weights
 
-    return {name: centroid(frame[name]) for name in ("e_l0", "e_l1", "e_r1", "e_r2")}
+    return {
+        name: centroid(frame[name])
+        for name in ("e_l0", "e_l1", "e_r1", "e_r2")
+    }
 
 
 def _tonal_glide(frame: dict) -> bool:
-    """True when the spectral centroid is a sweep rather than a step."""
+    """Return whether the spectral centroid is a sweep rather than a step."""
+
     cent = _centroids(frame)["e_l1"]
     times = frame["times"]
     if cent.size < 8 or float(np.ptp(cent)) < 150.0:
@@ -358,7 +508,9 @@ def _freq_contrast_hz(frame: dict) -> np.ndarray:
     def share(energy: np.ndarray) -> np.ndarray:
         return energy.max(axis=0) / (energy.sum(axis=0) + 1e-12)
 
-    tonal = (share(frame["e_l1"]) > PEAK_SHARE_TONAL) & (share(frame["e_r1"]) > PEAK_SHARE_TONAL)
+    tonal = (share(frame["e_l1"]) > PEAK_SHARE_TONAL) & (
+        share(frame["e_r1"]) > PEAK_SHARE_TONAL
+    )
     return np.where(tonal, contrast, 0.0)
 
 
@@ -367,7 +519,12 @@ def _audible_mask(y: np.ndarray, sr: int, frame: dict) -> np.ndarray:
     n_frames = len(y) // frame_len
     if n_frames < 2:
         return np.ones(len(frame["times"]), dtype=bool)
-    rms = np.sqrt(np.mean((y[: n_frames * frame_len] ** 2).reshape(n_frames, frame_len), axis=1))
+    rms = np.sqrt(
+        np.mean(
+            (y[: n_frames * frame_len] ** 2).reshape(n_frames, frame_len),
+            axis=1,
+        )
+    )
     threshold = max(1e-4, 0.04 * float(np.percentile(rms, 80)))
     silent = rms < threshold
     prefix = np.concatenate([[0.0], np.cumsum(silent.astype(np.float64))])
@@ -376,20 +533,36 @@ def _audible_mask(y: np.ndarray, sr: int, frame: dict) -> np.ndarray:
         step = frame["step"]
         pad_n = frame["pad_n"]
         n = len(y)
-        start = np.clip(start_coef * step - pad_n, 0, n).astype(int) // frame_len
-        stop = np.clip((start_coef + frame["win"]) * step - pad_n, 0, n).astype(int) // frame_len
+        start = (
+            np.clip(start_coef * step - pad_n, 0, n).astype(int) // frame_len
+        )
+        stop = (
+            np.clip(
+                (start_coef + frame["win"]) * step - pad_n,
+                0,
+                n,
+            ).astype(int)
+            // frame_len
+        )
         start = np.clip(start, 0, n_frames - 1)
         stop = np.clip(np.maximum(start + 1, stop), 0, n_frames)
         return (prefix[stop] - prefix[start]) / (stop - start)
 
-    loud = (_rms(y, frame, frame["l1"]) > threshold) & (_rms(y, frame, frame["r1"]) > threshold)
-    return loud & (fraction(frame["l1"]) < 0.30) & (fraction(frame["r1"]) < 0.30)
+    loud = (_rms(y, frame, frame["l1"]) > threshold) & (
+        _rms(y, frame, frame["r1"]) > threshold
+    )
+    return loud & (fraction(frame["l1"]) < 0.30) & (
+        fraction(frame["r1"]) < 0.30
+    )
 
 
 def _transient_excess(y: np.ndarray, sr: int, frame: dict) -> np.ndarray:
-    """Haar spike versus the surrounding 0.4 s, pooled so an 8 ms hop cannot skip it."""
+    """Haar spike versus the surrounding 0.4 s, pooled over the 8 ms hop."""
+
     padded = y if len(y) % 2 == 0 else np.pad(y, (0, 1))
-    detail = np.abs(pywt.swt(padded, "haar", level=1, norm=True)[0][1][: len(y)])
+    detail = np.abs(
+        pywt.swt(padded, "haar", level=1, norm=True)[0][1][: len(y)]
+    )
     half = max(1, int(0.002 * sr))
     peak = maximum_filter(detail, size=2 * half + 1)
     base = median_filter(detail, size=max(3, int(0.05 * sr) | 1))
@@ -397,7 +570,11 @@ def _transient_excess(y: np.ndarray, sr: int, frame: dict) -> np.ndarray:
     local = median_filter(ratio, size=max(3, int(0.4 * sr) | 1))
     excess = ratio / (local + 1e-8)
     pooled = maximum_filter(excess, size=max(3, int(0.016 * sr) | 1))
-    centers = np.clip(np.rint(frame["times"] * sr).astype(int), 0, len(y) - 1)
+    centers = np.clip(
+        np.rint(frame["times"] * sr).astype(int),
+        0,
+        len(y) - 1,
+    )
     return pooled[centers]
 
 
@@ -411,7 +588,8 @@ def _combined_score(
         [
             np.clip(timbre, 0.0, None) / TIMBRE_SCORE_SCALE,
             np.clip(level_db, 0.0, None) / LEVEL_SCORE_SCALE_DB,
-            np.clip(transient - TRANSIENT_FLOOR, 0.0, None) / TRANSIENT_SCORE_SCALE,
+            np.clip(transient - TRANSIENT_FLOOR, 0.0, None)
+            / TRANSIENT_SCORE_SCALE,
             np.clip(freq_hz, 0.0, None) / FREQ_SCORE_SCALE_HZ,
         ]
     )
@@ -422,8 +600,10 @@ def _pick_peaks(score: np.ndarray, hop_sec: float) -> np.ndarray:
     if score.size < 3 or float(np.max(score)) < CANDIDATE_SCORE:
         return np.array([], dtype=int)
     distance = max(1, int(round(0.15 / max(hop_sec, 1e-6))))
-    peaks, _props = find_peaks(score, height=CANDIDATE_SCORE, distance=distance, prominence=0.55)
+    peaks, _properties = find_peaks(
+        score,
+        height=CANDIDATE_SCORE,
+        distance=distance,
+        prominence=0.55,
+    )
     return peaks
-
-from ProcessFiles import *
-print(len(detect_splices(normalize_file(input()), 16000).candidates))
