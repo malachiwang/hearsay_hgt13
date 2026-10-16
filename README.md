@@ -10,11 +10,13 @@ Official judging results are not archived in this checkout. It contains no organ
 
 | Evidence | What it establishes | What it does not establish |
 | --- | --- | --- |
-| [forensics_submission.tsv](forensics_submission.tsv) | 1,671 rows with unique filenames and finite scores in `[0, 1]`; two tab-separated columns, without a header | Accuracy, minDCF, placement, submission validity, or the exact model/configuration that produced it |
+| [forensics_submission.tsv](forensics_submission.tsv) | 1,671 rows with unique filenames and finite scores in `[0, 1]`; two tab-separated columns, without a header | Accuracy, minDCF, placement, submission validity, or the exact checkpoint revision and runtime configuration |
 | [Evaluator tests](tests/test_min_dcf.py) | Agreement with a local transcription of ASVspoof5 Track 1 scoring, including score direction and ties | Independent verification against the organizer's evaluation service |
 | [Feature and fusion tests](tests/) | Behavior on constructed signals, embeddings, and feature tables | Detector quality on a labeled speech corpus |
 
-There are no saved local validation reports or historical benchmark results in the current tree. Unit-test metrics are fixture checks, not competition results.
+There are no saved local validation reports or historical benchmark results in the current tree. Unit-test metrics are fixture checks, not competition results. Archived handoff notes contain development results and negative findings; their provenance and limits are preserved in the [experiment notes](legacy/README.md#historical-findings).
+
+The original Eliya competition submission path is identified in the historical README at commit `26a69b8` as [forensics_infer.py](forensics_infer.py), which scores only the first five seconds. Its headerless, six-decimal output matches the format of the saved TSV. The current runner and Docker image use whole-clip sliding windows, described in that history as a later improvement. We do not claim that they reproduce the original submission. The [provenance notes](legacy/README.md#submission-provenance) distinguish this evidence from an exact run record, which is missing.
 
 ## Implemented system
 
@@ -38,16 +40,20 @@ Only `eliya_top3_mean` affects the final `fake_probability` and judging score. L
 
 ### Detection methods and their status
 
-| Component | What it measures or contributes | Used in the judging score? |
-| --- | --- | --- |
-| Eliya detector | Pretrained neural scores over the full clip. The local wrapper describes the external architecture as WavLM + AASIST and the setup script fetches `microsoft/wavlm-large`. Architecture and weights are downloaded, not vendored. | Yes, through `eliya_top3_mean` |
-| [CPPS](HarmonicAnalysis.py) | Whole-clip smoothed cepstral peak prominence, an acoustic periodicity feature | No; standalone feature extractor |
-| [Physical splice detector](DetectSplices.py) | Wavelet-based changes in timbre, level, transients, and frequency; returns candidate times and continuous features | No; standalone feature extractor |
-| [Embedding novelty](NoveltySplice.py) | Local changes in supplied embeddings using cosine similarity and checkerboard kernels | No; no WavLM embedding extraction is connected to it |
-| [Learned fusion](fusion/) | Logistic regression with fold-local scaling or a fixed LightGBM baseline over numeric feature tables | No; cross-validation infrastructure, with no saved final fusion model |
-| [ENF](ENF.py) | Experimental mains-frequency tracking and discontinuity heuristics | No; exploratory script with local-path assumptions |
+| Component | What it measures or contributes | Status | Used in the current judging score? |
+| --- | --- | --- | --- |
+| Eliya detector | Pretrained neural scores over the full clip. The local wrapper describes the external architecture as WavLM + AASIST and the setup script fetches `microsoft/wavlm-large`. Architecture and weights are downloaded, not vendored. | Active judging path | Yes, through `eliya_top3_mean` |
+| [CPPS](HarmonicAnalysis.py) | Whole-clip smoothed cepstral peak prominence, an acoustic periodicity feature | Implemented experiment | No; standalone feature extractor |
+| [Physical splice detector](DetectSplices.py) | Wavelet-based changes in timbre, level, transients, and frequency; returns candidate times and continuous features | Implemented experiment | No; standalone feature extractor |
+| [Embedding novelty](NoveltySplice.py) | Local changes in supplied embeddings using cosine similarity and checkerboard kernels | Incomplete or disconnected experiment | No; the separate WavLM pipelines do not supply local embeddings to it |
+| [Learned fusion](fusion/) | Logistic regression with fold-local scaling or a fixed LightGBM baseline over numeric feature tables | Implemented experiment | No; cross-validation infrastructure, with no saved final fusion model |
+| [ENF](ENF.py) | Experimental mains-frequency tracking and discontinuity heuristics | Incomplete or disconnected experiment | No; exploratory script with local-path assumptions |
+| [Original Eliya batch script](forensics_infer.py) | First-five-seconds inference, zero-padding short clips; headerless TSV | Original competition submission path, according to commit `26a69b8` | No |
+| [Residual fingerprints](rfp_detector.py) | Filtered/unfiltered spectral residuals, source fingerprints, and relative Mahalanobis distances | Implemented experiment | No; independent of Eliya, PACE, and `fusion/` |
+| [PACE pipeline](pace_pipeline.py) | Frozen WavLM layer statistics and LFCC features, PCA, XGBoost classifiers, and logistic score stacking | Implemented experiment | No; separate training and TSV-generation workflow |
+| [Earlier WavLM pipeline](wavlm_pipeline.py) | Last-layer mean-pooled WavLM features with logistic regression | Implemented experiment, superseded by the PACE approach | No |
 
-The separate [legacy AASIST script](legacy/aasist/TestAASIST.py) is an earlier cropped-clip experiment, not the active windowed wrapper. Feature contracts, evaluation precautions, and historical context are in [the experiment notes](legacy/README.md).
+The separate [legacy AASIST script](legacy/aasist/TestAASIST.py) is an incomplete or disconnected experiment: an earlier cropped-clip script with missing external assets. The lossless-ingestion implementation from commit `b04a5ea` is historical work no longer present on `main`. Feature contracts, evaluation precautions, and historical context are in [the experiment notes](legacy/README.md).
 
 ### Optional Grok interpretation
 
@@ -117,7 +123,7 @@ On any scoring failure it exits nonzero before replacing the output. A successfu
 
 ### Docker
 
-The image installs audio system libraries, downloads model assets at build time, and checks their presence in offline mode. Building needs network access and substantial model storage. The configured entry point is the same batch runner.
+The image installs audio system libraries, downloads model assets at build time, and checks their presence in offline mode. Building needs network access and substantial model storage. The configured entry point is `run_hearsay.py`, not `forensics_infer.py`. This image packages the active judging path, not a verified reproduction of `forensics_submission.tsv`.
 
 ```bash
 docker build -t hearsay .
@@ -173,14 +179,19 @@ python -m unittest discover -s tests -p 'test_grok_interpretation.py' -v
 
 Tests use generated fixtures and mocked neural models/API responses. They do not require model downloads, private audio, or xAI credentials. Full-suite collection still requires packages such as PyTorch, Parselmouth, PyWavelets, and LightGBM. Tests cover window boundaries and score orientation, splice behavior, CPPS, strict feature joins, fold-local fusion, evaluator parity, Grok isolation, and TSV output.
 
-During this documentation review, 56 tests passed across the evaluator, runner, Grok, feature-table, and embedding-novelty modules. The toy example and detector/runner/evaluator `--help` commands also passed with Python 3.12.4 and the already-installed packages. The full suite, real inference, model download/verification, and Docker were not verified: required packages, model assets, audio, FFmpeg, and Docker were unavailable. The downloader's `--help` failed on a missing `huggingface_hub` import. Live Grok requests were not tested because `XAI_API_KEY` was unset. No dependencies or models were installed for this review.
+During the earlier documentation cleanup, 56 tests passed across the evaluator, runner, Grok, feature-table, and embedding-novelty modules. The toy example and detector/runner/evaluator `--help` commands also passed with Python 3.12.4 and the already-installed packages. The full suite, real inference, model download/verification, and Docker were not verified: required packages, model assets, audio, FFmpeg, and Docker were unavailable. The downloader's `--help` failed on a missing `huggingface_hub` import. Live Grok requests were not tested because `XAI_API_KEY` was unset. No dependencies or models were installed for that review.
 
 ## Repository structure
 
 | Path | Purpose |
 | --- | --- |
 | `NewAttempt/Deepfake.py` | Active model loader, audio preparation, windowing, and analysis CLI |
-| `run_hearsay.py` | Judging batch entry point |
+| `run_hearsay.py` | Active judging batch entry point |
+| `forensics_infer.py`, `run_forensics.sbatch` | Original competition submission path and its PACE job configuration |
+| `rfp_detector.py`, `audio_utils.py`, `build_manifest.py` | Implemented residual-fingerprint experiment, audio helper, and dataset manifest builder |
+| `pace_pipeline.py`, `run_hearsay.sbatch` | Implemented WavLM/LFCC training experiment and its PACE job, distinct from `run_hearsay.py` |
+| `wavlm_pipeline.py` | Earlier implemented WavLM/logistic experiment |
+| `setup_pace.sh`, `requirements_pace.txt`, `download_real_speech.py` | Experimental PACE environment and external speech-data preparation |
 | `grok_interpretation.py` | Optional explanation of measured evidence |
 | `evaluation/` | minDCF, score-table CLI, descriptive splice analysis |
 | `fusion/` | Strict feature tables and logistic/LightGBM OOF diagnostics |
@@ -202,6 +213,6 @@ During this documentation review, 56 tests passed across the evaluator, runner, 
 
 ## Team and attribution
 
-We developed HEARSAY as a team. The current branch's commit history credits Jonathan Chang with early audio-processing, AASIST, harmonic/splice, ENF, and Eliya integration work, and Malachi Wang with the evaluator, CPPS/splice refinements, novelty analysis, fusion infrastructure, sliding-window integration, runner, Docker packaging, and Grok integration. Historical residual-fingerprint work by `himankgalundia` is recorded separately in the [experiment notes](legacy/README.md#historical-work).
+We developed HEARSAY as a team. The current branch's commit history credits Jonathan Chang with early audio-processing, AASIST, harmonic/splice, ENF, and Eliya integration work, and Malachi Wang with the evaluator, CPPS/splice refinements, novelty analysis, fusion infrastructure, sliding-window integration, runner, Docker packaging, and Grok integration. Himank Galundia (`himankgalundia`) contributed the residual-fingerprint detector, WavLM/PACE experiments, and original forensics submission tooling, merged into `main` in `6c7459a`. See the [experiment notes](legacy/README.md#residual-fingerprints-and-attribution).
 
-The active pretrained model is `eliya/forensics_0.3B_base_deepfake_classifier`, with `microsoft/wavlm-large` as the externally fetched backbone. CPPS uses Praat through Parselmouth; physical splice features use PyWavelets and SciPy. The metric follows the ASVspoof5 Track 1 convention encoded in the evaluator and its local reference test. No challenge audio or third-party training corpus is redistributed here; upstream model code, weights, and data remain separately attributed assets.
+The active pretrained model is `eliya/forensics_0.3B_base_deepfake_classifier`, with `microsoft/wavlm-large` as the externally fetched backbone. The separate WavLM experiments use `microsoft/wavlm-base-plus`. CPPS uses Praat through Parselmouth; physical splice features use PyWavelets and SciPy. The metric follows the ASVspoof5 Track 1 convention encoded in the evaluator and its local reference test. No challenge audio or third-party training corpus is redistributed here; upstream model code, weights, and data remain separately attributed assets.
