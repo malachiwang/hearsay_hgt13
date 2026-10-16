@@ -4,19 +4,21 @@ HEARSAY scores audio for synthetic manipulation using a pretrained speech detect
 
 We built HEARSAY for the NSA Audio Authentication Challenge at HackGT 13. The task was to distinguish bona fide recordings from synthetic or manipulated audio and produce one score per file. Our work in this checkout includes model integration, full-clip windowing, a batch submission runner, an NSA-style evaluator, signal-processing experiments, fusion infrastructure, and an optional explanation layer.
 
-## Results and provenance
+## Results
 
-Official judging results are not archived in this checkout. It contains no organizer report, held-out answer key, or leaderboard supporting a placement or official minDCF, so we do not assert those results here.
+HEARSAY placed **3rd in the NSA Audio Authentication Challenge at HackGT 13**.
 
-| Evidence | What it establishes | What it does not establish |
-| --- | --- | --- |
-| [forensics_submission.tsv](forensics_submission.tsv) | 1,671 rows with unique filenames and finite scores in `[0, 1]`; two tab-separated columns, without a header | Accuracy, minDCF, placement, submission validity, or the exact checkpoint revision and runtime configuration |
-| [Evaluator tests](tests/test_min_dcf.py) | Agreement with a local transcription of ASVspoof5 Track 1 scoring, including score direction and ties | Independent verification against the organizer's evaluation service |
-| [Feature and fusion tests](tests/) | Behavior on constructed signals, embeddings, and feature tables | Detector quality on a labeled speech corpus |
+Our submitted detector received a **0.0248 minDCF** on the organizer’s evaluator, the second-lowest raw score on the competition leaderboard. The lower-scoring entry was later determined not to be a valid submission, making HEARSAY the best-scoring valid submission on the primary detector metric.
 
-There are no saved local validation reports or historical benchmark results in the current tree. Unit-test metrics are fixture checks, not competition results. Archived handoff notes contain development results and negative findings; their provenance and limits are preserved in the [experiment notes](legacy/README.md#historical-findings).
+The detector metric represented 60% of judging, with the remaining 40% based on the project presentation and explainability. Detector ranking and final placement are therefore separate results.
 
-The original Eliya competition submission path is identified in the historical README at commit `26a69b8` as [forensics_infer.py](forensics_infer.py), which scores only the first five seconds. Its headerless, six-decimal output matches the format of the saved TSV. The current runner and Docker image use whole-clip sliding windows, described in that history as a later improvement. We do not claim that they reproduce the original submission. The [provenance notes](legacy/README.md#submission-provenance) distinguish this evidence from an exact run record, which is missing.
+The preserved [forensics_submission.tsv](forensics_submission.tsv) contains the original submission scores. The challenge test labels and organizer evaluator were not released, so the official 0.0248 result cannot be independently recalculated from this repository alone.
+
+### Submission and current pipeline
+
+The original competition submission used [forensics_infer.py](forensics_infer.py), which scores the first five seconds of each recording. The current [run_hearsay.py](run_hearsay.py) pipeline uses full-clip sliding-window inference and top-three window aggregation. It is a later improvement, not an exact reproduction of the submitted score file.
+
+Detailed historical evidence and provenance are preserved in the [experiment notes](legacy/README.md#submission-provenance).
 
 ## Implemented system
 
@@ -123,7 +125,7 @@ On any scoring failure it exits nonzero before replacing the output. A successfu
 
 ### Docker
 
-The image installs audio system libraries, downloads model assets at build time, and checks their presence in offline mode. Building needs network access and substantial model storage. The configured entry point is `run_hearsay.py`, not `forensics_infer.py`. This image packages the active judging path, not a verified reproduction of `forensics_submission.tsv`.
+The image installs audio system libraries, downloads model assets at build time, and checks their presence in offline mode. Building needs network access and substantial model storage. The configured entry point is `run_hearsay.py`.
 
 ```bash
 docker build -t hearsay .
@@ -177,7 +179,7 @@ python -m unittest discover -s tests -p 'test_run_hearsay.py' -v
 python -m unittest discover -s tests -p 'test_grok_interpretation.py' -v
 ```
 
-Tests use generated fixtures and mocked neural models/API responses. They do not require model downloads, private audio, or xAI credentials. Full-suite collection still requires packages such as PyTorch, Parselmouth, PyWavelets, and LightGBM. Tests cover window boundaries and score orientation, splice behavior, CPPS, strict feature joins, fold-local fusion, evaluator parity, Grok isolation, and TSV output.
+Tests use generated fixtures and mocked neural models/API responses. Fixture metrics check implementation behavior; they are not corpus-level detector results or independent verification of the organizer’s evaluator. They do not require model downloads, private audio, or xAI credentials. Full-suite collection still requires packages such as PyTorch, Parselmouth, PyWavelets, and LightGBM. Tests cover window boundaries and score orientation, splice behavior, CPPS, strict feature joins, fold-local fusion, evaluator parity, Grok isolation, and TSV output.
 
 During the earlier documentation cleanup, 56 tests passed across the evaluator, runner, Grok, feature-table, and embedding-novelty modules. The toy example and detector/runner/evaluator `--help` commands also passed with Python 3.12.4 and the already-installed packages. The full suite, real inference, model download/verification, and Docker were not verified: required packages, model assets, audio, FFmpeg, and Docker were unavailable. The downloader's `--help` failed on a missing `huggingface_hub` import. Live Grok requests were not tested because `XAI_API_KEY` was unset. No dependencies or models were installed for that review.
 
@@ -209,7 +211,6 @@ During the earlier documentation cleanup, 56 tests passed across the evaluator, 
 - High window scores identify intervals to review, not precise edit boundaries. Short clips are repeated, which changes their model input.
 - CPPS, splice, and ENF evidence is not proof of synthesis. Natural recording changes can trigger boundaries; fully synthetic clips can be internally consistent. No saved ablation shows that adding these features improves detection.
 - Fusion is not integrated into final inference. Ordinary out-of-fold stacking is a development diagnostic; it does not establish a leakage-free nested evaluation. See the [evaluation protocol](legacy/README.md#fusion-and-evaluation-protocol).
-- Reproducing the saved submission requires its original audio, labels, model revision, and run configuration, which are absent. The repository cannot independently establish the official result.
 
 ## Team and attribution
 
